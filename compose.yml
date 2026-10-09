@@ -1,0 +1,73 @@
+name: sentinel
+x-sentinel: &sentinel
+  build: .
+  image: sentinel:local
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql://sentinel:${POSTGRES_PASSWORD:-sentinel_dev_password}@postgres:5432/sentinel
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentinel_dev_password}
+      POSTGRES_DB: sentinel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on first start with an empty volume: enables uuid-ossp
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # Append-only file so queued jobs survive a restart
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot job: applies pending migrations, then exits
+  migrate:
+    <<: *sentinel
+    command: ["node_modules/.bin/node-pg-migrate", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *sentinel
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *sentinel
+    command: ["node", "Queue/startWorker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  redisdata:
